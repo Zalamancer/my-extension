@@ -1,27 +1,41 @@
-// background.js  ─── Manifest V3 service‑worker
+// background.js – Manifest V3 service‑worker
 console.log('[GeminiAutoAnswer] service‑worker alive');
 
-chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
-    console.log('[BG] got message', msg);           //  << add
+async function countTokens(apiKey, modelName, promptText) {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1/models/${modelName}:countTokens?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents:[{ parts:[{ text: promptText }] }] })
+      }
+    );
+    if (!resp.ok) return null;
+    const j = await resp.json();
+    return j.totalTokens;                // integer
+  }
 
+  
+chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
   if (msg?.action !== 'getAnswer') return;
 
   const { question, choices, containerId, isMultiple } = msg.payload;
   console.log('[BG] got message', question.slice(0, 60) + '…');
 
-  // ── 1.  get the key
-  const apiKey = await new Promise(r =>
-    chrome.storage.sync.get('GM_API_KEY', d => r(d.GM_API_KEY))
-  );
-  console.log('[BG] apiKey is', apiKey ? 'present' : 'missing');
+  /* ---- API key -------------------------------------------------- */
+  const apiKey      = (await chrome.storage.sync.get('GM_API_KEY')).GM_API_KEY;
+  const bookSummary = (await chrome.storage.local.get('BOOK_SUMMARY')).BOOK_SUMMARY || '';
+
   if (!apiKey) {
-    sendResponse({ error: 'no‑api‑key' });
-    return true; // keep port open even on error
+    console.warn('[BG] no API key');
+    sendResponse({ error: 'no-api-key' });
+    return true;
   }
 
-  // ── 2.  build prompt
-  const prompt =
-`You are an expert test taker.
+  /* ---- build prompt -------------------------------------------- */
+  const prompt = `${bookSummary}
+
+You are an expert test taker.
 Return ONLY the letter(s) you believe are correct.
 If more than one, separate them with commas or spaces (e.g. "A,C" or "B D").
 
@@ -30,52 +44,63 @@ ${question}
 ${choices.map(c => `${c.letter}) ${c.text}`).join('\n')}
 `;
 
-  // ── 3.  call Gemini
-  let letter = null;
+const model = 'gemini-1.5-flash';
+
+const promptTokens = await countTokens(apiKey, model, prompt)
+                         .catch(() => null);
+
+if (promptTokens !== null)
+  console.log('[BG] prompt tokens =', promptTokens);
+
+
+  /* ---- call Gemini --------------------------------------------- */
+  let letters = [];
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }]
+        body: JSON.stringify({ 
+        contents:[{ parts:[{ text: prompt }] }],
         })
       }
     );
 
     if (!res.ok) {
-      const body = await res.text();
-      console.error('[BG] fetch failed', res.status, body);
-      sendResponse({ error: 'fetch-fail', status: res.status });
+      console.error('[BG] fetch failed', res.status);
+      sendResponse({ error:'fetch', status:res.status });
       return true;
     }
 
-    const json = await res.json();
-    console.log('[BG] gemini raw', json);
-
-    const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const m = rawText.match(/[A-Z]/gi);
-    letter = m ? [...new Set(m.map(x => x.toUpperCase()))] : null;  // array
+    const json     = await res.json();
+    if (json.usageMetadata) {
+          console.log(
+            `[BG] tokens prompt=${json.usageMetadata.promptTokenCount}  ` +
+            `answer=${json.usageMetadata.candidatesTokenCount}`
+          );
+        }
+    const rawText  = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    letters        = [...new Set((rawText.match(/[A-Z]/gi) || [])
+                                 .map(x => x.toUpperCase()))];
   } catch (e) {
     console.error('[BG] fetch threw', e);
-    sendResponse({ error: 'fetch-exception', message: e.message });
+    sendResponse({ error:'exception', msg:e.message });
     return true;
   }
 
-  // ── 4.  send answer back (or report we couldn’t parse)
-  if (letter && letter.length) {
-    console.log('[BG] answerResult', letter);
+  /* ---- send result back ---------------------------------------- */
+  if (letters.length) {
     chrome.tabs.sendMessage(sender.tab.id, {
       action: 'answerResult',
       containerId,
-      answerLetters: Array.isArray(letter) ? letter : [letter]
+      answerLetters: letters
     });
-    sendResponse({ ok: true });
+    sendResponse({ ok:true });
   } else {
-    console.warn('[BG] could not extract letter from Gemini output');
-    sendResponse({ error: 'no-letter' });
+    console.warn('[BG] could not extract letter(s) from Gemini output');
+    sendResponse({ error:'no-letter' });
   }
 
-  return true;          // ✅ keep the message port alive
+  return true;  // keep port alive
 });
