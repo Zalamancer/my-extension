@@ -1,0 +1,30 @@
+{
+    "name": "UTD eLearning – Gemini Auto‑Answer",
+    "description": "Finds multiple‑choice questions in eLearning and lets Gemini pick the answer.",
+    "version": "1.0",
+    "manifest_version": 3,
+  
+    "permissions": ["activeTab", "scripting", "storage"],
+    "host_permissions": [
+      "https://elearning.utdallas.edu/*",
+      "https://generativelanguage.googleapis.com/*"
+    ],
+  
+"content_scripts": [
+  {
+    "matches": ["https://elearning.utdallas.edu/*"],
+    "js": ["content.js"],
+    "all_frames": true,
+    "match_about_blank": true,
+    "run_at": "document_idle"
+  }
+],
+   
+
+   
+  
+    "background": { "service_worker": "background.js", "type": "module" },
+  
+    "options_page": "options.html"
+  }
+  
